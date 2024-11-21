@@ -1,0 +1,306 @@
+﻿QIIME2 PIPELINE - January 2024 (updated with new sequences)
+
+
+### SECTION 1: INSTALL CONDA AND QIIME ###
+
+
+# make sure you're running the latest version of conda
+conda update conda
+
+
+# install the conda wget function if not done already
+conda install wget
+
+
+# install most recent version of qiime in your conda environment (this may take awhile)
+wget https://data.qiime2.org/distro/core/qiime2-2023.2-py38-osx-conda.yml
+CONDA_SUBDIR=osx-64 conda env create -n qiime2-2023.2 --file qiime2-2023.2-py38-osx-conda.yml
+
+
+# activate qiime environment
+conda activate qiime2-2023.2 
+conda config --env --set subdir osx-64
+
+
+# optional cleanup 
+rm qiime2-2023.2-py38-osx-conda.yml
+
+
+# check that qiime is installed 
+qiime --help
+
+
+# change working directory to where a place to put all the output, which should have folder called ‘Sequences’ which has all the sequences
+cd Desktop/HudsonBay2024
+
+
+
+
+### SECTION 2: IMPORT SEQUENCES ###
+
+
+#import sequence data with import function
+! qiime tools import \
+--type 'SampleData[PairedEndSequencesWithQuality]' \
+--input-path Sequences \
+--input-format CasavaOneEightSingleLanePerSampleDirFmt \
+--output-path demux-paired.qza
+
+
+#remove primers
+qiime cutadapt trim-paired \
+        --i-demultiplexed-sequences demux-paired.qza \
+        --p-adapter-f ATTAGAWACCCBNGTAGTCC \
+        --p-adapter-r TTACCGCGGCKGCTGRCAC \
+        --p-indels \
+--p-match-read-wildcards \
+--p-match-adapter-wildcards \
+        --o-trimmed-sequences demux-trim-adapt.qza
+
+
+qiime cutadapt trim-paired \
+        --i-demultiplexed-sequences demux-trim-adapt.qza \
+        --p-front-f GTGYCAGCMGCCGCGGTAA \
+        --p-front-r GGACTACNVGGGTWTCTAAT \
+        --p-indels \
+--p-match-read-wildcards \
+--p-match-adapter-wildcards \
+        --p-discard-untrimmed \
+        --o-trimmed-sequences demux-trim-primers.qza
+
+
+
+
+### SECTION 3: QUALITY CHECK ###
+
+
+#convert artifact (.qza) to a visualization (.qzv)
+#these sequences come already demultiplexed
+# if not in demultiplexed format then use the demux function
+! qiime demux summarize \
+--i-data demux-trim-primers.qza \
+--o-visualization demux-trim-primers.qzv
+
+
+# if in ssh without viewing windows, you cannot view the files organically, so go to view.qiime2.org to view the files (you will have to rsync them so that they are on your local device fist)
+# if you can, view your .qzv files in the demux.qzv quality plots 
+# see where the median quality scores of the bases drops below 30
+qiime tools view demux-trim-primers.qzv
+
+
+
+
+### SECTION 4: FILTERING WITH DADA2 ###
+
+
+# method requires two parameters that are used in quality filtering:
+# --p-trim-left m, which trims off the first m bases of each sequence
+# --p-trunc-len n which truncates each sequence at position n
+# m and n should correspond to the where your median quality score 
+# drops below 30 (m before and n at the end)
+# this allows the user to remove low quality regions of the sequences
+# with paired-end sequences you need to make sure the sequences overlap sufficiently after trimming
+
+
+# FOR THESE READS, NEED TO TRIM AT 230 AND NOT HIGHER BECAUSE MOST UNMERGED (FORWARD OR REVERSE) READS ARE 230 LONG AND IF YOU DO HIGHER THAN THAT, DADA2 THROWS OUT ALL THE READS THAT IT CAN’T TRUNCATE
+
+
+qiime dada2 denoise-paired \
+--i-demultiplexed-seqs demux-trim-primers.qza \
+--p-trunc-len-f 230 \
+--p-trunc-len-r 230 \
+--p-chimera-method consensus \
+--p-n-threads 0 \
+--output-dir DADA2_DenoisingOutput \
+--verbose
+
+
+qiime metadata tabulate \
+--m-input-file DADA2_DenoisingOutput/denoising_stats.qza \
+--o-visualization DADA2_DenoisingOutput/denoising_stats.qzv
+
+
+qiime tools view DADA2_DenoisingOutput/denoising_stats.qzv
+
+
+# filter by length because we have a couple sequences much higher than we want (for 515-806 primers, anything under 250 and over 255 is probably non-target DNA)
+# works by viewing the representative sequences qza as a metadata file and then filtering appropriately 
+# this command keeps everything under 256 
+
+
+qiime feature-table filter-seqs \
+--i-data DADA2_DenoisingOutput/representative_sequences.qza \
+--m-metadata-file DADA2_DenoisingOutput/representative_sequences.qza \
+--p-where 'length(sequence) < 256' \
+--o-filtered-data DADA2_DenoisingOutput/representative_sequences_filtered.qza \
+--verbose
+
+
+# export the representative sequences with the length filtering
+
+
+qiime feature-table tabulate-seqs \
+--i-data DADA2_DenoisingOutput/representative_sequences_filtered.qza \
+--o-visualization DADA2_DenoisingOutput/representative_sequences_filtered.qzv
+
+
+qiime tools view DADA2_DenoisingOutput/representative_sequences_filtered.qzv
+
+
+# export the table that has the length filtering
+
+
+qiime feature-table filter-features \
+--i-table DADA2_DenoisingOutput/table.qza \
+--m-metadata-file DADA2_DenoisingOutput/representative_sequences_filtered.qza \
+--o-filtered-table DADA2_DenoisingOutput/table_filtered.qza
+
+
+qiime feature-table summarize \
+--i-table DADA2_DenoisingOutput/table_filtered.qza \
+--o-visualization DADA2_DenoisingOutput/table_filtered.qzv
+
+
+qiime tools view DADA2_DenoisingOutput/table_filtered.qzv
+
+
+
+
+### SECTION 5: ASSIGNING TAXONOMY ###
+
+
+# download the desired taxonomic classifiers, in this case we are using Silva 138 99% OTUs full-length sequences, to get the most recent release find the link on the following website: https://docs.qiime2.org/2023.2/data-resources/
+# once it’s downloaded, move it to the working directory folder
+
+
+qiime feature-classifier classify-sklearn \
+--i-classifier silva-138-99-nb-classifier.qza \
+--i-reads DADA2_DenoisingOutput/representative_sequences_filtered.qza \
+--output-dir ClassifiedSeqs \
+--verbose
+
+
+qiime metadata tabulate \
+--m-input-file ClassifiedSeqs/classification.qza \
+--o-visualization ClassifiedSeqs/taxonomy.qzv
+
+
+qiime tools view ClassifiedSeqs/taxonomy.qzv
+
+
+
+
+### SECTION 6: TAXONOMY BASED FILTERING ###
+
+
+mkdir TaxaFilterOutput
+
+
+# targeting 16S rRNA, we want to target bacteria and archaea, so we can exclude sequences that are unexpected such as those from chloroplasts or mitochondria
+
+
+# note: this will look different depending on the database used. Silva specifically uses the following format for annotations: k__;p__;c__;o__;f__;g__;s__ 
+
+
+# also, --p-mode contains ensures that search terms are case insensitve (e.g., mitochondria versus Mitochondria
+
+
+qiime taxa filter-table \
+  --i-table DADA2_DenoisingOutput/table_filtered.qza \
+  --i-taxonomy ClassifiedSeqs/classification.qza \
+  --p-mode contains \
+  --p-exclude 'p__;,Chloroplast,Mitochondria,f__;,Comamonadaceae' \
+  --o-filtered-table TaxaFilterOutput/table_taxafiltered.qza  
+
+
+# view the new feature table 
+
+
+qiime feature-table summarize \
+--i-table TaxaFilterOutput/table_taxafiltered.qza \
+--o-visualization TaxaFilterOutput/table_taxafiltered.qzv
+
+
+qiime tools view TaxaFilterOutput/table_taxafiltered.qzv
+
+
+# save the new filtered representative sequences
+
+
+qiime feature-table filter-seqs \
+  --i-data DADA2_DenoisingOutput/representative_sequences_filtered.qza \
+  --i-table TaxaFilterOutput/table_taxafiltered.qza \
+  --o-filtered-data TaxaFilterOutput/rep_seqs_taxafiltered.qza
+
+
+# save the new taxonomy file by running the classifier on the new representative sequences
+
+
+qiime feature-classifier classify-sklearn \
+--i-classifier silva-138-99-nb-classifier.qza \
+--i-reads TaxaFilterOutput/rep_seqs_taxafiltered.qza \
+--output-dir ClassifiedSeqs/TaxaFilter \
+--verbose
+
+
+qiime metadata tabulate \
+--m-input-file ClassifiedSeqs/TaxaFilter/classification.qza \
+--o-visualization ClassifiedSeqs/TaxaFilter/taxonomy.qzv
+
+
+qiime tools view ClassifiedSeqs/TaxaFilter/taxonomy.qzv
+
+
+
+
+### SECTION 7: CREATE PHYLOGENETIC TREE ###
+
+
+# make directory to store phylogenetic files
+mkdir Phylogeny
+
+
+# make tree
+qiime phylogeny align-to-tree-mafft-fasttree \
+--i-sequences TaxaFilterOutput/rep_seqs_taxafiltered.qza \
+--o-alignment Phylogeny/aligned-rep-seqs.qza \
+--o-masked-alignment Phylogeny/masked-aligned-rep-seqs.qza \
+--o-tree Phylogeny/unrooted-tree.qza \
+--o-rooted-tree Phylogeny/rooted-tree.qza
+
+
+
+
+### SECTION 8: EXPORT FILES FOR ANALYSIS IN R ###
+
+
+# make a directory to put them in 
+mkdir Export
+
+
+qiime tools export \
+--input-path TaxaFilterOutput/table_taxafiltered.qza \
+--output-path Export/table
+
+
+biom convert \
+-i Export/table/feature-table.biom \
+-o Export/table/table.tsv --to-tsv
+
+
+qiime tools export \
+--input-path TaxaFilterOutput/rep_seqs_taxafiltered.qza \
+--output-path Export/rep-seqs.fasta
+
+
+qiime tools export \
+--input-path ClassifiedSeqs/TaxaFilter/classification.qza \
+--output-path Export/taxonomy
+
+
+qiime tools export \
+--input-path Phylogeny/rooted-tree.qza \
+--output-path Export/exported-tree
+
+
+## all done, now you can transfer the files in export into R
